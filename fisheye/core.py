@@ -18,7 +18,7 @@ def load_model(filename, calib_img_shape=None):
 
 def extract_corners(img, img_index, nx, ny, subpix_criteria, verbose):
     """Extract chessboard corners."""
-    
+
     if type(img) == str:
         fname = img
         if verbose:
@@ -54,7 +54,7 @@ def extract_corners(img, img_index, nx, ny, subpix_criteria, verbose):
             gray,
             cb_2D_pts,
             (3, 3),
-            (-1,-1),
+            (-1, -1),
             subpix_criteria
         )
 
@@ -75,7 +75,7 @@ class FishEye(object):
         self,
         nx,
         ny,
-        img_shape=None,        
+        img_shape=None,
         verbose=False
         ):
 
@@ -94,6 +94,7 @@ class FishEye(object):
         max_iter=30,
         eps=1e-6,
         show_imgs=False,
+        return_mask=False,
         calibration_flags=cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC+cv2.fisheye.CALIB_CHECK_COND+cv2.fisheye.CALIB_FIX_SKEW,
         n_jobs=-1,
         backend='threading'
@@ -115,8 +116,8 @@ class FishEye(object):
 
         assert not ((img_paths is None) and (imgs is None)), 'Either specify imgs or img_paths'
 
-        chessboard_model = np.zeros((1, self._nx*self._ny, 3), np.float32)
-        chessboard_model[0, :, :2] = np.mgrid[0:self._nx, 0:self._ny].T.reshape(-1, 2)
+        self.chessboard_model = np.zeros((1, self._nx*self._ny, 3), np.float32)
+        self.chessboard_model[0, :, :2] = np.mgrid[0:self._nx, 0:self._ny].T.reshape(-1, 2)
 
         #
         # Arrays to store the chessboard image points from all the images.
@@ -126,8 +127,8 @@ class FishEye(object):
         subpix_criteria = (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER, 30, 0.1)
 
         if show_imgs:
-            cv2.namedWindow('checkboard img', cv2.WINDOW_NORMAL)
-            cv2.namedWindow('fail img', cv2.WINDOW_NORMAL)
+            cv2.namedWindow('checkboard img', cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow('fail img', cv2.WINDOW_AUTOSIZE)
 
         if img_paths is not None:
             imgs = img_paths
@@ -138,7 +139,8 @@ class FishEye(object):
                     img, img_index, self._nx, self._ny, subpix_criteria, self._verbose
                     ) for img_index, img in enumerate(imgs)
             )
-        
+
+        mask = []
         for img_index, (img, (ret, cb_2d_pts)) in enumerate(zip(imgs, rets)):
 
             if type(img) == str:
@@ -160,6 +162,8 @@ class FishEye(object):
                 assert self._img_shape == img.shape[:2], \
                        "All images must share the same size."
             if ret:
+                mask.append(True)
+
                 #
                 # Was able to find the chessboard in the image, append the 3D points
                 # and image points (after refining them).
@@ -178,13 +182,15 @@ class FishEye(object):
                     # Draw and display the corners
                     #
                     img = cv2.drawChessboardCorners(
-                        img, (self._nx, self._ny),
+                        img.copy(), (self._nx, self._ny),
                         cb_2d_pts,
                         ret
                     )
                     cv2.imshow('checkboard img', img)
                     cv2.waitKey(500)
             else:
+                mask.append(False)
+
                 if self._verbose:
                     logging.info('FAIL!')
 
@@ -217,7 +223,7 @@ class FishEye(object):
 
         rms, _, _, _, _ = \
             cv2.fisheye.calibrate(
-                [chessboard_model]*N_OK,
+                [self.chessboard_model]*N_OK,
                 chess_2Dpts_list,
                 (img.shape[1], img.shape[0]),
                 K,
@@ -228,7 +234,11 @@ class FishEye(object):
                 (cv2.TERM_CRITERIA_EPS+cv2.TERM_CRITERIA_MAX_ITER, max_iter, eps)
             )
 
-        return rms, K, D, rvecs, tvecs
+        if return_mask:
+            return rms, K, D, rvecs, tvecs, mask
+        else:
+            return rms, K, D, rvecs, tvecs
+
 
     def undistort(self, distorted_img, undistorted_size=None, R=np.eye(3), K=None):
         """Undistort an image using the fisheye model"""
@@ -258,9 +268,15 @@ class FishEye(object):
 
         return undistorted_img
 
-    def projectPoints(self, object_points, skew=0, rvec=None, tvec=None):
+    def projectPoints(self, object_points=None, skew=0, rvec=None, tvec=None):
         """Projects points using fisheye model.
         """
+
+        if object_points is None:
+            #
+            # The default is to project the checkerboard.
+            #
+            object_points = self.chessboard_model
 
         if object_points.ndim == 2:
             object_points = np.expand_dims(object_points, 0)
@@ -376,17 +392,17 @@ class FishEye(object):
     @property
     def img_shape(self):
         """Shape of image used for calibration."""
-        
+
         return self._img_shape
-    
+
     @classmethod
     def load(cls, filename, calib_img_shape=None):
         """Load a previously saved fisheye model.
         Note: this is a classmethod.
-        
+
         Args:
             filename (str): Path to previously saved FishEye object.
-            calib_img_shape (Optional[tuple]): Shape of images used for            
+            calib_img_shape (Optional[tuple]): Shape of images used for
                 calibration.
         Returns:
             FishEye object.
@@ -397,9 +413,10 @@ class FishEye(object):
 
         assert hasattr(tmp_obj, '_img_shape') or calib_img_shape is not None, \
                "FishEye obj does not include 'img_shape'. You need to explicitly specify one."
-        
-        img_shape = getattr(tmp_obj, 'img_shape', calib_img_shape[:2])
-        
+
+        img_shape = getattr(tmp_obj, 'img_shape', calib_img_shape)
+        img_shape = img_shape[:2]
+
         obj = FishEye(nx=tmp_obj._nx, ny=tmp_obj._ny, img_shape=img_shape)
         obj.__dict__.update(tmp_obj.__dict__)
 
